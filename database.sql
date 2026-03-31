@@ -16,6 +16,16 @@ CREATE TABLE users (
 
 
 
+ CREATE TABLE IF NOT EXISTS public.offres
+(
+    id integer NOT NULL DEFAULT nextval('offres_id_seq'::regclass),
+    recruteur_id integer NOT NULL,
+    titre character varying(255) COLLATE pg_catalog."default" NOT NULL,
+    description text COLLATE pg_catalog."default",
+    date_creation timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    statut character varying(50) COLLATE pg_catalog."default" DEFAULT 'active'::character varying,
+    CONSTRAINT offres_pkey PRIMARY KEY (id)
+)
 
 
 
@@ -27,3 +37,19 @@ CREATE TABLE candidatures (
     statut VARCHAR(50) DEFAULT 'EN ATTENTE', 
     date_postulation TIMESTAMP DEFAULT CURRENT_TIMESTAMP  
 );
+
+
+CREATE INDEX idx_notifications_non_lues ON notifications(candidat_id, est_lu) WHERE est_lu = false;CREATE
+  TABLE IF NOT EXISTS notifications (
+    id SERIAL PRIMARY KEY,
+    candidat_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    candidature_id INTEGER NOT NULL REFERENCES candidatures(id) ON DELETE CASCADE,
+    message TEXT NOT NULL,
+    type VARCHAR(50) NOT NULL,
+    est_lu BOOLEAN DEFAULT false,
+    date_creation TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_notifications_candidat ON notifications(candidat_id);
+CREATE INDEX idx_notifications_candidature ON notifications(candidature_id);
+CREATE INDEX idx_notifications_date ON notifications(date_creation DESC);
