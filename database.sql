@@ -53,3 +53,12 @@ CREATE INDEX idx_notifications_non_lues ON notifications(candidat_id, est_lu) WH
 CREATE INDEX idx_notifications_candidat ON notifications(candidat_id);
 CREATE INDEX idx_notifications_candidature ON notifications(candidature_id);
 CREATE INDEX idx_notifications_date ON notifications(date_creation DESC);
+
+
+CREATE TABLE messages (
+  id SERIAL PRIMARY KEY,
+  candidat_id INT,
+  sender VARCHAR(10),
+  text TEXT,
+  created_at TIMESTAMP DEFAULT NOW()
+);

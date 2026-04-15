@@ -1,23 +1,19 @@
+require('dotenv').config();
+const { GoogleGenAI } = require('@google/genai');
 const express = require("express");
 const bcrypt = require("bcrypt");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
+const pdfParse = require('pdf-parse');
 const path = require("path");
 const pool = require("./db");
 const fs = require('fs').promises; 
-
-
-
-
 const app = express();
 const PORT = 3000;
-
 const http = require("http");
 const { Server } = require("socket.io");
-
 const server = http.createServer(app);
-
 // Configuration Socket.IO avec CORS
 const io = new Server(server, {
   cors: {
@@ -25,16 +21,13 @@ const io = new Server(server, {
     credentials: true
   }
 });
-
 // Stocker les utilisateurs connectés
 const users = {};
-
 // =============================================
 // SOCKET.IO GESTION
 // =============================================
 io.on("connection", (socket) => {
   console.log("🔌 Nouvelle connexion socket:", socket.id);
-
   // Associer userId à la room
   socket.on("join", (userId) => {
     users[userId] = socket.id;
@@ -54,6 +47,18 @@ io.on("connection", (socket) => {
   });
 });
 
+
+// Vérifier que la clé API existe
+if (!process.env.GEMINI_API_KEY) {
+  console.error('❌ Erreur: GEMINI_API_KEY manquante dans .env');
+  process.exit(1);
+}
+
+// Initialiser Gemini
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+
+
 // =============================================
 // FONCTION UTILITAIRE POUR LES NOTIFICATIONS
 // =============================================
@@ -66,7 +71,6 @@ async function sendNotification(candidatId, candidatureId, message, type) {
        RETURNING id, date_creation`,
       [candidatId, candidatureId, message, type]
     );
-    
     // 2. Envoyer en temps réel si l'utilisateur est connecté
     const socketId = users[candidatId];
     if (socketId) {
@@ -82,20 +86,17 @@ async function sendNotification(candidatId, candidatureId, message, type) {
     } else {
       console.log(`💾 Notification sauvegardée (candidat ${candidatId} non connecté)`);
     }
-    
     return result.rows[0].id;
   } catch (error) {
     console.error("❌ Erreur envoi notification:", error);
     return null;
   }
 }
-
 // Middleware CORS
 app.use(cors({
   origin: "http://localhost:3001", // Modifiez selon votre frontend
   credentials: true
 }));
-
 // 🔐 Middleware pour vérifier JWT
 const verifyToken = (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -142,6 +143,10 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 }
 });
 
+
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true })); 
 // =============================================
 // ROUTES D'UPLOAD (AVANT express.json)
 // =============================================
@@ -564,6 +569,7 @@ app.put("/profile", verifyToken, async (req, res) => {
 });
 
 // GET mes candidatures
+// Dans votre backend, modifiez le mapping des statuts pour être cohérent :
 app.get("/mescandidatures", verifyToken, async (req, res) => {
   try {
     if (req.user.role !== "CANDIDAT") {
@@ -572,7 +578,7 @@ app.get("/mescandidatures", verifyToken, async (req, res) => {
 
     const result = await pool.query(
       `SELECT c.id AS candidature_id, o.titre AS offre_titre, u.nom AS recruteur_nom,
-              c.statut, c.date_postulation
+              c.statut, c.date_postulation, c.cv
        FROM candidatures c
        JOIN offres o ON c.offre_id = o.id
        JOIN users u ON o.recruteur_id = u.id
@@ -581,26 +587,14 @@ app.get("/mescandidatures", verifyToken, async (req, res) => {
       [req.user.id]
     );
 
-    // Convertir les statuts pour l'affichage
-    const statutMapping = {
-      'EN_ATTENTE': 'EN ATTENTE',
-      'EN_COURS': 'EN COURS',
-      'ACCEPTE': 'ACCEPTÉE',
-      'REFUSE': 'REFUSÉE'
-    };
-
-    const candidaturesFormatees = result.rows.map(c => ({
-      ...c,
-      statut: statutMapping[c.statut] || c.statut
-    }));
-
-    res.json(candidaturesFormatees);
+    // Garder les statuts en anglais pour le traitement (c'est plus propre)
+    // Pas besoin de mapper, gardez EN_ATTENTE, ACCEPTE, REFUSE
+    res.json(result.rows);
   } catch (err) {
     console.error(err.message);
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
-
 // GET - Récupérer les candidatures avec détails des candidats et extraction du texte du CV
 app.get("/recruteur/candidatures-analyse", verifyToken, async (req, res) => {
   try {
@@ -649,7 +643,9 @@ app.get("/recruteur/candidatures-analyse", verifyToken, async (req, res) => {
           const fsSync = require('fs');
           if (fsSync.existsSync(cvPath)) {
             // Utiliser l'extracteur avec OCR
-            cv_text = await pdfExtractor.extractText(cvPath);
+            const dataBuffer = await fs.readFile(cvPath);
+const pdfData = await pdfParse(dataBuffer);
+cv_text = pdfData.text;
             
             if (cv_text && cv_text.trim().length > 0) {
               console.log(`✅ Texte extrait (${cv_text.length} caractères) pour ${row.candidat_prenom} ${row.candidat_nom}`);
@@ -900,6 +896,64 @@ app.get("/recruteur/candidatures", verifyToken, async (req, res) => {
   }
 });
 
+
+
+// PUT - Mettre à jour le statut d'une candidature
+app.put("/recruteur/candidatures/:candidatureId/statut", verifyToken, async (req, res) => {
+  try {
+    if (req.user.role !== "RECRUTEUR") {
+      return res.status(403).json({ error: "Accès réservé aux recruteurs" });
+    }
+
+    const { candidatureId } = req.params;
+    const { statut } = req.body;
+    const recruteurId = req.user.id;
+
+    // Vérifier que la candidature appartient à une offre du recruteur
+    const checkResult = await pool.query(
+      `SELECT c.id, c.candidat_id, o.titre, o.id as offre_id
+       FROM candidatures c
+       JOIN offres o ON c.offre_id = o.id
+       WHERE c.id = $1 AND o.recruteur_id = $2`,
+      [candidatureId, recruteurId]
+    );
+
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({ error: "Candidature non trouvée ou non autorisée" });
+    }
+
+    const candidature = checkResult.rows[0];
+
+    // Mettre à jour le statut
+    await pool.query(
+      "UPDATE candidatures SET statut = $1 WHERE id = $2",
+      [statut, candidatureId]
+    );
+
+    // Envoyer une notification au candidat
+    const message = `Votre candidature pour l'offre "${candidature.titre}" a été ${statut === 'ACCEPTE' ? 'acceptée' : statut === 'REFUSE' ? 'refusée' : 'mise en attente'}`;
+    
+    await sendNotification(
+      candidature.candidat_id,
+      candidatureId,
+      message,
+      statut === 'ACCEPTE' ? 'acceptation' : statut === 'REFUSE' ? 'refus' : 'attente'
+    );
+
+    res.json({ 
+      success: true, 
+      message: "Statut mis à jour avec succès",
+      nouveauStatut: statut
+    });
+
+  } catch (err) {
+    console.error("Erreur mise à jour statut:", err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+
+
 // =============================================
 // ROUTES POUR LES NOTIFICATIONS
 // =============================================
@@ -999,8 +1053,6 @@ app.put("/notifications/:notificationId/lire", verifyToken, async (req, res) => 
   }
 });
 
-
-
 // PUT - Marquer toutes les notifications comme lues
 app.put("/notifications/tout-lire", verifyToken, async (req, res) => {
   try {
@@ -1018,112 +1070,656 @@ app.put("/notifications/tout-lire", verifyToken, async (req, res) => {
   }
 });
 
+
+
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+
+const conversations = new Map();
+
+
+
+
+
+
+
 // =============================================
-// ROUTE PRINCIPALE POUR LA MISE À JOUR DES STATUTS (AVEC NOTIFICATION)
+// ROUTES POUR LE TABLEAU DE BORD
 // =============================================
 
-// PUT - Mettre à jour le statut d'une candidature (AVEC NOTIFICATION)
-app.put("/recruteur/candidatures/:candidatureId/statut", verifyToken, async (req, res) => {
+// GET - Statistiques complètes pour le dashboard candidat
+app.get("/dashboard/stats", verifyToken, async (req, res) => {
+  try {
+    if (req.user.role !== "CANDIDAT") {
+      return res.status(403).json({ error: "Accès réservé aux candidats" });
+    }
+
+    const candidatId = req.user.id;
+
+    // 1. Récupérer les infos du candidat
+    const userResult = await pool.query(
+      "SELECT nom, prénom, created_at FROM users WHERE id = $1",
+      [candidatId]
+    );
+    const user = userResult.rows[0];
+
+    // 2. Statistiques des candidatures du candidat
+    const statsResult = await pool.query(
+      `SELECT 
+        COUNT(*) as total,
+        SUM(CASE WHEN statut = 'EN_ATTENTE' THEN 1 ELSE 0 END) as en_attente,
+        SUM(CASE WHEN statut = 'ACCEPTE' THEN 1 ELSE 0 END) as acceptees,
+        SUM(CASE WHEN statut = 'REFUSE' THEN 1 ELSE 0 END) as refusees
+       FROM candidatures 
+       WHERE candidat_id = $1`,
+      [candidatId]
+    );
+    const stats = statsResult.rows[0];
+
+    // 3. Nombre de notifications non lues
+    const notifResult = await pool.query(
+      "SELECT COUNT(*) as non_lues FROM notifications WHERE candidat_id = $1 AND est_lu = false",
+      [candidatId]
+    );
+    const notificationsNonLues = parseInt(notifResult.rows[0].non_lues);
+
+    // 4. Top offres les plus demandées (offres où le candidat a postulé)
+    const topOffresResult = await pool.query(
+      `SELECT 
+        o.titre,
+        COUNT(c2.id) as total_candidatures
+       FROM offres o
+       JOIN candidatures c2 ON o.id = c2.offre_id
+       WHERE o.id IN (
+         SELECT DISTINCT offre_id FROM candidatures WHERE candidat_id = $1
+       )
+       GROUP BY o.id, o.titre
+       ORDER BY total_candidatures DESC
+       LIMIT 5`,
+      [candidatId]
+    );
+
+    // 5. Évolution des candidatures par mois (pour la courbe)
+    const evolutionResult = await pool.query(
+      `SELECT 
+        TO_CHAR(date_postulation, 'YYYY-MM') as mois,
+        COUNT(*) as nombre
+       FROM candidatures
+       WHERE candidat_id = $1
+       GROUP BY TO_CHAR(date_postulation, 'YYYY-MM')
+       ORDER BY mois ASC
+       LIMIT 12`,
+      [candidatId]
+    );
+
+    // 6. Dernières activités (candidatures récentes)
+    const dernieresActivites = await pool.query(
+      `SELECT 
+        c.date_postulation,
+        o.titre as offre_titre,
+        c.statut
+       FROM candidatures c
+       JOIN offres o ON c.offre_id = o.id
+       WHERE c.candidat_id = $1
+       ORDER BY c.date_postulation DESC
+       LIMIT 5`,
+      [candidatId]
+    );
+
+    // Calculer le temps écoulé depuis l'inscription
+    const dateInscription = new Date(user.created_at);
+    const maintenant = new Date();
+    const joursInscrit = Math.floor((maintenant - dateInscription) / (1000 * 60 * 60 * 24));
+
+    res.json({
+      user: {
+        nom: user.nom,
+        prenom: user.prénom,
+        joursInscrit: joursInscrit || 1
+      },
+      stats: {
+        total: parseInt(stats.total || 0),
+        enAttente: parseInt(stats.en_attente || 0),
+        acceptees: parseInt(stats.acceptees || 0),
+        refusees: parseInt(stats.refusees || 0),
+        tauxAcceptation: stats.total > 0 ? Math.round((stats.acceptees / stats.total) * 100) : 0
+      },
+      notificationsNonLues,
+      topOffres: topOffresResult.rows,
+      evolution: evolutionResult.rows,
+      dernieresActivites: dernieresActivites.rows
+    });
+
+  } catch (err) {
+    console.error("Erreur dashboard stats:", err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+// =============================================
+// ROUTE - Top offres avec nombre de candidats (pour le dashboard candidat)
+// =============================================
+app.get("/dashboard/top-offres-candidats", verifyToken, async (req, res) => {
+  try {
+    if (req.user.role !== "CANDIDAT") {
+      return res.status(403).json({ error: "Accès réservé aux candidats" });
+    }
+
+    const candidatId = req.user.id;
+
+    // Récupérer les offres où le candidat a postulé, avec le nombre total de candidats sur chaque offre
+    const result = await pool.query(
+      `SELECT 
+        o.id AS offre_id,
+        o.titre AS offre_titre,
+        COUNT(DISTINCT c2.candidat_id) AS total_candidats,
+        CASE 
+          WHEN c1.statut = 'EN_ATTENTE' THEN 'En attente'
+          WHEN c1.statut = 'ACCEPTE' THEN 'Acceptée'
+          WHEN c1.statut = 'REFUSE' THEN 'Refusée'
+          ELSE 'En attente'
+        END AS mon_statut
+       FROM candidatures c1
+       JOIN offres o ON c1.offre_id = o.id
+       LEFT JOIN candidatures c2 ON o.id = c2.offre_id
+       WHERE c1.candidat_id = $1
+       GROUP BY o.id, o.titre, c1.statut
+       ORDER BY total_candidats DESC`,
+      [candidatId]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Erreur top offres candidats:", err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+
+// =============================================
+// ROUTE - SUPPRIMER UN COMPTE CANDIDAT
+// =============================================
+app.delete("/delete-account", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    // Vérifier que l'utilisateur existe
+    const userCheck = await pool.query(
+      "SELECT id, role FROM users WHERE id = $1",
+      [userId]
+    );
+
+    if (userCheck.rows.length === 0) {
+      return res.status(404).json({ error: "Utilisateur non trouvé" });
+    }
+
+    // Démarrer une transaction pour garantir la suppression complète
+    const client = await pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+
+      // 1. Supprimer les notifications liées au candidat
+      await client.query(
+        "DELETE FROM notifications WHERE candidat_id = $1",
+        [userId]
+      );
+
+      // 2. Supprimer les candidatures du candidat
+      await client.query(
+        "DELETE FROM candidatures WHERE candidat_id = $1",
+        [userId]
+      );
+
+      // 3. Si c'est un recruteur, supprimer ses offres
+      if (userRole === "RECRUTEUR") {
+        await client.query(
+          "DELETE FROM offres WHERE recruteur_id = $1",
+          [userId]
+        );
+      }
+
+      // 4. Supprimer le fichier CV si existe
+      const cvResult = await client.query(
+        "SELECT cv FROM users WHERE id = $1",
+        [userId]
+      );
+      
+      if (cvResult.rows[0]?.cv) {
+        const cvPath = path.join(__dirname, "uploads", cvResult.rows[0].cv);
+        try {
+          await fs.unlink(cvPath);
+          console.log(`🗑️ CV supprimé: ${cvPath}`);
+        } catch (err) {
+          console.log(`⚠️ Fichier CV non trouvé: ${cvPath}`);
+        }
+      }
+
+      // 5. Supprimer l'utilisateur
+      await client.query(
+        "DELETE FROM users WHERE id = $1",
+        [userId]
+      );
+
+      await client.query('COMMIT');
+      
+      console.log(`✅ Compte utilisateur ${userId} supprimé avec succès`);
+      res.json({ 
+        success: true, 
+        message: "Votre compte a été supprimé avec succès" 
+      });
+      
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+    
+  } catch (err) {
+    console.error("❌ Erreur suppression compte:", err);
+    res.status(500).json({ 
+      error: "Erreur lors de la suppression du compte",
+      details: err.message 
+    });
+  }
+});
+
+
+// =============================================
+// ROUTES POUR LE TABLEAU DE BORD RECRUTEUR AMÉLIORÉ
+// =============================================
+
+// GET - Récupérer toutes les offres du recruteur avec statistiques détaillées
+app.get("/recruteur/offres-analyse", verifyToken, async (req, res) => {
   try {
     if (req.user.role !== "RECRUTEUR") {
       return res.status(403).json({ error: "Accès réservé aux recruteurs" });
     }
 
-    const { candidatureId } = req.params;
-    const { statut } = req.body;
     const recruteurId = req.user.id;
 
-    // Mapping des statuts (format frontend -> base de données)
-    const statutMapping = {
-      'EN ATTENTE': 'EN_ATTENTE',
-      'EN COURS': 'EN_COURS',
-      'ACCEPTÉE': 'ACCEPTE',
-      'REFUSÉE': 'REFUSE'
-    };
-    
-    const statutBase = statutMapping[statut];
-    if (!statutBase) {
-      return res.status(400).json({ 
-        error: "Statut invalide. Valeurs acceptées: EN ATTENTE, EN COURS, ACCEPTÉE, REFUSÉE"
-      });
-    }
-
-    // Vérifier que la candidature appartient au recruteur et récupérer les infos
-    const candidatureData = await pool.query(
-      `SELECT c.id, c.candidat_id, c.statut as ancien_statut, o.titre as offre_titre,
-              u.nom as candidat_nom, u.prénom as candidat_prenom
-       FROM candidatures c
-       JOIN offres o ON c.offre_id = o.id
-       JOIN users u ON c.candidat_id = u.id
-       WHERE c.id = $1 AND o.recruteur_id = $2`,
-      [candidatureId, recruteurId]
+    // Récupérer toutes les offres du recruteur
+    const offresResult = await pool.query(
+      `SELECT 
+        o.id, 
+        o.titre, 
+        o.description, 
+        o.date_creation,
+        COUNT(DISTINCT c.id) as total_candidatures,
+        COUNT(DISTINCT CASE WHEN c.statut = 'EN_ATTENTE' THEN c.id END) as en_attente,
+        COUNT(DISTINCT CASE WHEN c.statut = 'ACCEPTE' THEN c.id END) as acceptees,
+        COUNT(DISTINCT CASE WHEN c.statut = 'REFUSE' THEN c.id END) as refusees
+       FROM offres o
+       LEFT JOIN candidatures c ON o.id = c.offre_id
+       WHERE o.recruteur_id = $1
+       GROUP BY o.id, o.titre, o.description, o.date_creation
+       ORDER BY o.date_creation DESC`,
+      [recruteurId]
     );
 
-    if (candidatureData.rows.length === 0) {
-      return res.status(404).json({ error: "Candidature non trouvée ou non autorisée" });
-    }
+    // Calculer le taux d'acceptation pour chaque offre
+    const offresAvecStats = offresResult.rows.map(offre => ({
+      ...offre,
+      taux_acceptation: offre.total_candidatures > 0 
+        ? Math.round((offre.acceptees / offre.total_candidatures) * 100) 
+        : 0
+    }));
 
-    const { candidat_id, ancien_statut, offre_titre, candidat_prenom } = candidatureData.rows[0];
-
-    // Mettre à jour le statut
-    await pool.query(
-      "UPDATE candidatures SET statut = $1 WHERE id = $2",
-      [statutBase, candidatureId]
-    );
-
-    // Générer le message de notification personnalisé
-    let message = "";
-    switch(statutBase) {
-      case 'ACCEPTE':
-        message = `🎉 Félicitations ${candidat_prenom} ! Votre candidature pour l'offre "${offre_titre}" a été acceptée. Le recruteur vous contactera très prochainement.`;
-        break;
-      case 'REFUSE':
-        message = `💼 Bonjour ${candidat_prenom}, votre candidature pour l'offre "${offre_titre}" n'a malheureusement pas été retenue. Bonne continuation dans vos recherches !`;
-        break;
-      case 'EN_COURS':
-        message = `📋 Bonne nouvelle ${candidat_prenom} ! Votre candidature pour l'offre "${offre_titre}" est en cours d'examen.`;
-        break;
-      case 'EN_ATTENTE':
-        message = `⏳ Votre candidature pour l'offre "${offre_titre}" est en attente de traitement.`;
-        break;
-      default:
-        message = `Le statut de votre candidature pour l'offre "${offre_titre}" a été modifié.`;
-    }
-
-    // Ajouter l'ancien statut si pertinent
-    if (ancien_statut && ancien_statut !== statutBase && ancien_statut !== 'EN_ATTENTE') {
-      const ancienLibelle = {
-        'EN_ATTENTE': 'en attente',
-        'EN_COURS': 'en cours',
-        'ACCEPTE': 'acceptée',
-        'REFUSE': 'refusée'
-      }[ancien_statut];
-      if (ancienLibelle) {
-        message += ` (Statut précédent: ${ancienLibelle})`;
-      }
-    }
-
-    // Envoyer la notification (sauvegarde BDD + Socket.IO temps réel)
-    await sendNotification(candidat_id, candidatureId, message, 'STATUT_CHANGE');
-
-    res.json({
-      success: true,
-      message: "Statut mis à jour avec succès",
-      candidature: {
-        id: candidatureId,
-        statut: statut // Format lisible pour le frontend
-      }
-    });
-
+    res.json(offresAvecStats);
   } catch (err) {
-    console.error("Erreur mise à jour statut:", err);
+    console.error("Erreur récupération offres analyse:", err);
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
 
+// GET - Top offres les plus demandées (pour un recruteur)
+app.get("/recruteur/top-offres", verifyToken, async (req, res) => {
+  try {
+    if (req.user.role !== "RECRUTEUR") {
+      return res.status(403).json({ error: "Accès réservé aux recruteurs" });
+    }
+
+    const recruteurId = req.user.id;
+
+    const result = await pool.query(
+      `SELECT 
+        o.id,
+        o.titre,
+        COUNT(c.id) as total_candidatures,
+        COUNT(CASE WHEN c.statut = 'ACCEPTE' THEN 1 END) as acceptees
+       FROM offres o
+       LEFT JOIN candidatures c ON o.id = c.offre_id
+       WHERE o.recruteur_id = $1
+       GROUP BY o.id, o.titre
+       ORDER BY total_candidatures DESC
+       LIMIT 5`,
+      [recruteurId]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Erreur top offres:", err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// GET - Offres les moins demandées (pour un recruteur)
+app.get("/recruteur/bottom-offres", verifyToken, async (req, res) => {
+  try {
+    if (req.user.role !== "RECRUTEUR") {
+      return res.status(403).json({ error: "Accès réservé aux recruteurs" });
+    }
+
+    const recruteurId = req.user.id;
+
+    const result = await pool.query(
+      `SELECT 
+        o.id,
+        o.titre,
+        COUNT(c.id) as total_candidatures,
+        COUNT(CASE WHEN c.statut = 'ACCEPTE' THEN 1 END) as acceptees
+       FROM offres o
+       LEFT JOIN candidatures c ON o.id = c.offre_id
+       WHERE o.recruteur_id = $1
+       GROUP BY o.id, o.titre
+       ORDER BY total_candidatures ASC
+       LIMIT 5`,
+      [recruteurId]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Erreur bottom offres:", err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// GET - Évolution des candidatures par mois pour un recruteur
+app.get("/recruteur/evolution-candidatures", verifyToken, async (req, res) => {
+  try {
+    if (req.user.role !== "RECRUTEUR") {
+      return res.status(403).json({ error: "Accès réservé aux recruteurs" });
+    }
+
+    const recruteurId = req.user.id;
+
+    const result = await pool.query(
+      `SELECT 
+        TO_CHAR(c.date_postulation, 'YYYY-MM') as mois,
+        COUNT(*) as nombre_candidatures,
+        COUNT(CASE WHEN c.statut = 'ACCEPTE' THEN 1 END) as acceptees
+       FROM candidatures c
+       JOIN offres o ON c.offre_id = o.id
+       WHERE o.recruteur_id = $1
+       GROUP BY TO_CHAR(c.date_postulation, 'YYYY-MM')
+       ORDER BY mois ASC
+       LIMIT 12`,
+      [recruteurId]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Erreur évolution candidatures:", err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// GET - Statistiques globales pour le dashboard recruteur
+app.get("/recruteur/stats-globales", verifyToken, async (req, res) => {
+  try {
+    if (req.user.role !== "RECRUTEUR") {
+      return res.status(403).json({ error: "Accès réservé aux recruteurs" });
+    }
+
+    const recruteurId = req.user.id;
+
+    // Statistiques globales
+    const statsResult = await pool.query(
+      `SELECT 
+        (SELECT COUNT(*) FROM offres WHERE recruteur_id = $1) as total_offres,
+        (SELECT COUNT(*) FROM candidatures c 
+         JOIN offres o ON c.offre_id = o.id 
+         WHERE o.recruteur_id = $1) as total_candidatures,
+        (SELECT COUNT(*) FROM candidatures c 
+         JOIN offres o ON c.offre_id = o.id 
+         WHERE o.recruteur_id = $1 AND c.statut = 'EN_ATTENTE') as en_attente,
+        (SELECT COUNT(*) FROM candidatures c 
+         JOIN offres o ON c.offre_id = o.id 
+         WHERE o.recruteur_id = $1 AND c.statut = 'ACCEPTE') as acceptees,
+        (SELECT COUNT(*) FROM candidatures c 
+         JOIN offres o ON c.offre_id = o.id 
+         WHERE o.recruteur_id = $1 AND c.statut = 'REFUSE') as refusees`,
+      [recruteurId]
+    );
+
+    const stats = statsResult.rows[0];
+    
+    // Calculer le taux d'acceptation global
+    const tauxAcceptation = stats.total_candidatures > 0 
+      ? Math.round((stats.acceptees / stats.total_candidatures) * 100) 
+      : 0;
+
+    // Moyenne de candidatures par offre
+    const moyenneCandidatures = stats.total_offres > 0 
+      ? (stats.total_candidatures / stats.total_offres).toFixed(1) 
+      : 0;
+
+    res.json({
+      total_offres: parseInt(stats.total_offres),
+      total_candidatures: parseInt(stats.total_candidatures),
+      en_attente: parseInt(stats.en_attente),
+      acceptees: parseInt(stats.acceptees),
+      refusees: parseInt(stats.refusees),
+      taux_acceptation: tauxAcceptation,
+      moyenne_candidatures_par_offre: parseFloat(moyenneCandidatures)
+    });
+  } catch (err) {
+    console.error("Erreur stats globales:", err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+// GET - Analyse détaillée d'une offre spécifique
+app.get("/recruteur/offre-analyse/:offreId", verifyToken, async (req, res) => {
+  try {
+    if (req.user.role !== "RECRUTEUR") {
+      return res.status(403).json({ error: "Accès réservé aux recruteurs" });
+    }
+
+    const recruteurId = req.user.id;
+    const { offreId } = req.params;
+
+    // Vérifier que l'offre appartient au recruteur
+    const offreCheck = await pool.query(
+      "SELECT id, titre, description FROM offres WHERE id = $1 AND recruteur_id = $2",
+      [offreId, recruteurId]
+    );
+
+    if (offreCheck.rows.length === 0) {
+      return res.status(404).json({ error: "Offre non trouvée ou non autorisée" });
+    }
+
+    // Statistiques détaillées de l'offre
+    const statsResult = await pool.query(
+      `SELECT 
+        COUNT(*) as total_candidatures,
+        COUNT(CASE WHEN statut = 'EN_ATTENTE' THEN 1 END) as en_attente,
+        COUNT(CASE WHEN statut = 'ACCEPTE' THEN 1 END) as acceptees,
+        COUNT(CASE WHEN statut = 'REFUSE' THEN 1 END) as refusees,
+        MIN(date_postulation) as premiere_candidature,
+        MAX(date_postulation) as derniere_candidature
+       FROM candidatures
+       WHERE offre_id = $1`,
+      [offreId]
+    );
+
+    const stats = statsResult.rows[0];
+    const tauxAcceptation = stats.total_candidatures > 0 
+      ? Math.round((stats.acceptees / stats.total_candidatures) * 100) 
+      : 0;
+
+    // Récupérer les candidats pour cette offre
+    const candidatsResult = await pool.query(
+      `SELECT 
+        u.id,
+        u.nom,
+        u.prénom,
+        u.email,
+        u.téléphone,
+        c.statut,
+        c.date_postulation,
+        c.cv
+       FROM candidatures c
+       JOIN users u ON c.candidat_id = u.id
+       WHERE c.offre_id = $1
+       ORDER BY c.date_postulation DESC`,
+      [offreId]
+    );
+
+    res.json({
+      offre: offreCheck.rows[0],
+      statistiques: {
+        total: parseInt(stats.total_candidatures),
+        en_attente: parseInt(stats.en_attente),
+        acceptees: parseInt(stats.acceptees),
+        refusees: parseInt(stats.refusees),
+        taux_acceptation: tauxAcceptation,
+        premiere_candidature: stats.premiere_candidature,
+        derniere_candidature: stats.derniere_candidature
+      },
+      candidats: candidatsResult.rows
+    });
+  } catch (err) {
+    console.error("Erreur analyse offre:", err);
+    res.status(500).json({ error: "Erreur serveur" });
+  }
+});
+
+
 // =============================================
-// ROUTE DE TEST SOCKET.IO
+// ROUTE CHAT - Version avec réponses prédéfinies (fonctionne sans API)
 // =============================================
+app.post('/chat', async (req, res) => {
+  console.log('📨 Message reçu:', req.body.message);
+  
+  const { message } = req.body;
+  const msg = message.toLowerCase();
+  
+  let reply = "";
+  
+  if (msg.includes("cv") || msg.includes("curriculum")) {
+    reply = `📄 **CONSEILS POUR UN BON CV**
+
+**Structure idéale :**
+1. En-tête (nom, prénom, coordonnées)
+2. Profil professionnel (3-4 lignes)
+3. Expériences professionnelles (les plus récentes)
+4. Formation et diplômes
+5. Compétences techniques et soft skills
+6. Langues
+7. Centres d'intérêt
+
+**À faire :**
+✅ Personnalisez selon l'offre
+✅ Utilisez des chiffres et résultats
+✅ Soignez la présentation (1 page max)
+
+**À éviter :**
+❌ Fautes d'orthographe
+❌ Photo (sauf demande)
+❌ Trop de texte
+
+💡 **Astuce :** Adaptez votre CV à chaque candidature !`;
+  }
+  else if (msg.includes("entretien")) {
+    reply = `🎯 **PRÉPARER UN ENTRETIEN D'EMBAUCHE**
+
+**Avant :**
+1. 🔍 Recherchez l'entreprise
+2. 📋 Relisez l'offre et votre CV
+3. 🎤 Préparez un pitch de 2 minutes
+4. ❓ Préparez 3-4 questions
+
+**Questions fréquentes :**
+• "Parlez-moi de vous"
+• "Vos forces/faiblesses ?"
+• "Pourquoi nous ?"
+
+**Le jour J :**
+• Arrivez 10 min en avance
+• Tenez-vous droit
+• Prenez le temps de répondre
+
+💡 **Astuce :** Entraînez-vous devant un miroir !`;
+  }
+  else if (msg.includes("salaire") || msg.includes("négocier")) {
+    reply = `💰 **NÉGOCIER SON SALAIRE**
+
+**Préparation :**
+1. Renseignez-vous sur les salaires du secteur
+2. Calculez votre salaire idéal
+3. Listez vos arguments
+
+**Pendant :**
+• Laissez l'employeur proposer en premier
+• Mettez en avant votre valeur
+• Restez professionnel
+
+**Exemple :**
+"Au vu de mon expérience, je vise une fourchette entre X et Y €"
+
+💡 **Astuce :** Négociez aussi les avantages !`;
+  }
+  else if (msg.includes("lettre") || msg.includes("motivation")) {
+    reply = `✉️ **LETTRE DE MOTIVATION**
+
+**Structure :**
+
+[Vos coordonnées]
+[Date]
+
+**Objet :** Candidature au poste de [titre]
+
+Madame, Monsieur,
+
+**Paragraphe 1** - Présentation et poste visé
+**Paragraphe 2** - Vos compétences
+**Paragraphe 3** - Pourquoi cette entreprise ?
+**Paragraphe 4** - Formule de politesse
+
+💡 **Astuce :** Personnalisez chaque lettre !`;
+  }
+  else {
+    reply = `🤖 **Assistant Recrutement**
+
+Bonjour ! Je suis votre assistant spécialisé en recrutement.
+
+📋 **Je peux vous aider sur :**
+• **CV** - Comment rédiger un CV efficace
+• **Entretien** - Préparer vos entretiens
+• **Salaire** - Négocier votre rémunération
+• **Lettre** - Lettre de motivation
+
+💬 **Posez-moi une question comme :**
+- "Comment rédiger un bon CV ?"
+- "Préparer un entretien d'embauche"
+- "Comment négocier mon salaire ?"
+
+Je suis là pour vous aider ! 😊`;
+  }
+  
+  console.log('✅ Réponse générée');
+  res.json({ reply: reply });
+});
+
+
+// Route de test
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', gemini: 'ready' });
+});
 
 
 
@@ -1134,3 +1730,4 @@ server.listen(PORT, () => {
   console.log(`🚀 Serveur lancé sur http://localhost:${PORT}`);
   console.log(`📡 Socket.IO prêt à recevoir des connexions`);
 });
+
