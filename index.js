@@ -1,5 +1,4 @@
-require('dotenv').config();
-const { GoogleGenAI } = require('@google/genai');
+
 const express = require("express");
 const bcrypt = require("bcrypt");
 const cors = require("cors");
@@ -46,18 +45,6 @@ io.on("connection", (socket) => {
     }
   });
 });
-
-
-// Vérifier que la clé API existe
-if (!process.env.GEMINI_API_KEY) {
-  console.error('❌ Erreur: GEMINI_API_KEY manquante dans .env');
-  process.exit(1);
-}
-
-// Initialiser Gemini
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
-
 
 // =============================================
 // FONCTION UTILITAIRE POUR LES NOTIFICATIONS
@@ -364,6 +351,7 @@ app.use(express.urlencoded({ extended: true }));
 // =============================================
 
 // Login
+// Dans la route /verification (login)
 app.post("/verification", async (req, res) => {
   try {
     const { email, mot_de_passe } = req.body;
@@ -378,15 +366,20 @@ app.post("/verification", async (req, res) => {
     }
 
     const user = result.rows[0];
-    console.log("🚀 ~ user:", user)
     const match = await bcrypt.compare(mot_de_passe, user.mot_de_passe);
 
     if (!match) {
       return res.status(401).json({ success: false, message: "Email ou mot de passe incorrect" });
     }
 
+    // MODIFIER ICI - Ajouter nom et prénom dans le token
     const token = jwt.sign(
-      { id: user.id, role: user.role },
+      { 
+        id: user.id, 
+        role: user.role,
+        nom: user.nom,        // Ajouté
+        prenom: user.prénom   // Ajouté
+      },
       "secretkey",
       { expiresIn: "1d" }
     );
