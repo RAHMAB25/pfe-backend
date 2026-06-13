@@ -23,4 +23,7 @@ router.get("/recruteur/candidatures", tockenService.verifyToken, CandidatureCont
 // Route de test pour extraire un CV spécifique (à ajouter avant le démarrage du serveur)
 router.get("/test-extract-cv/:candidatureId", tockenService.verifyToken, CandidatureController.testCvExtarct);
 
+// GET - Évolution des candidatures par mois pour un recruteur
+router.get("/recruteur/evolution-candidatures", tockenService.verifyToken, CandidatureController.evaluateCandidature );
+
 export default router;

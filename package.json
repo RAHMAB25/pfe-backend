@@ -5,8 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "nodemon index.js",
-    "debug": "node -r dotenv/config index.js",
+    "start": "node -r dotenv/config index.js",
     "build": "rm -rf dist && tsc --build tsconfig.build.json"
   },
   "keywords": [],

@@ -419,6 +419,35 @@ class CandidatureController {
        return null;
      }
    }
+
+   static async evaluateCandidature (req, res) {
+     try {
+       if (req.user.role !== "RECRUTEUR") {
+         return res.status(403).json({ error: "Accès réservé aux recruteurs" });
+       }
+   
+       const recruteurId = req.user.id;
+   
+       const result = await pool.query(
+         `SELECT 
+           TO_CHAR(c.date_postulation, 'YYYY-MM') as mois,
+           COUNT(*) as nombre_candidatures,
+           COUNT(CASE WHEN c.statut = 'ACCEPTE' THEN 1 END) as acceptees
+          FROM candidatures c
+          JOIN offres o ON c.offre_id = o.id
+          WHERE o.recruteur_id = $1
+          GROUP BY TO_CHAR(c.date_postulation, 'YYYY-MM')
+          ORDER BY mois ASC
+          LIMIT 12`,
+         [recruteurId]
+       );
+   
+       res.json(result.rows);
+     } catch (err) {
+       console.error("Erreur évolution candidatures:", err);
+       res.status(500).json({ error: "Erreur serveur" });
+     }
+   }
 }
 
 export default CandidatureController;
