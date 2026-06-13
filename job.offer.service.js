@@ -4,7 +4,7 @@ class JobOfferService {
 
   skillsService = new SkillsService()
 
-  getMatchingJobs(cvText, offresResult,) {
+  getMatchingJobs(cvText, offresResult) {
 
     const userSkills = this.skillsService.extractSkills(cvText);
   
