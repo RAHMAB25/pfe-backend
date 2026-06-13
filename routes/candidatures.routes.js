@@ -12,7 +12,7 @@ router.put("/recruteur/candidatures/:candidatureId/statut",tockenService.verifyT
 router.delete("/delete-account", tockenService.verifyToken, CandidatureController.deleteCandidat);
 
 // GET mes candidatures
-router.get("/mescandidatures", tockenService.verifyToken, CandidatureController.retrieveMaCandidautes);
+router.get("/mescandidatures", tockenService.verifyToken, CandidatureController.retrieveMyCandidautes);
 
 // GET - Récupérer les candidatures avec détails des candidats et extraction du texte du CV
 router.post("/recruteur/analyze-cv/:id", tockenService.verifyToken, CandidatureController.getAllCandidatures);

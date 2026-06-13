@@ -153,7 +153,7 @@ class CandidatureController {
      }
    }
 
-   static async retrieveMaCandidautes(req, res) {
+   static async retrieveMyCandidautes(req, res) {
      try {
        if (req.user.role !== "CANDIDAT") {
          return res.status(403).json({ error: "Accès refusé" });
