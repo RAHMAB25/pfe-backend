@@ -8,10 +8,14 @@ CREATE TABLE users (
     Téléphone VARCHAR(20),
     Domaine VARCHAR(100),
     Localisation VARCHAR(100),
-    Mot de passe VARCHAR(255) NOT NULL,
+    mot_de_passe VARCHAR(255) NOT NULL,
+    cv VARCHAR(255),
     role VARCHAR(20) CHECK (role IN ('RECRUTEUR', 'CANDIDAT')) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Add Missing sql script to create sequence 
+CREATE SEQUENCE offres_id_seq;
 
 
 
@@ -35,12 +39,11 @@ CREATE TABLE candidatures (
     offre_id INTEGER NOT NULL REFERENCES offres(id) ON DELETE CASCADE,   
     candidat_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, 
     statut VARCHAR(50) DEFAULT 'EN ATTENTE', 
-    date_postulation TIMESTAMP DEFAULT CURRENT_TIMESTAMP  
+    date_postulation TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    score INTEGER DEFAULT 0
 );
 
-
-CREATE INDEX idx_notifications_non_lues ON notifications(candidat_id, est_lu) WHERE est_lu = false;CREATE
-  TABLE IF NOT EXISTS notifications (
+CREATE TABLE IF NOT EXISTS notifications (
     id SERIAL PRIMARY KEY,
     candidat_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     candidature_id INTEGER NOT NULL REFERENCES candidatures(id) ON DELETE CASCADE,
@@ -49,6 +52,10 @@ CREATE INDEX idx_notifications_non_lues ON notifications(candidat_id, est_lu) WH
     est_lu BOOLEAN DEFAULT false,
     date_creation TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- QUSTION : Whath does mean "est_lu" ? 
+
+CREATE INDEX idx_notifications_non_lues ON notifications(candidat_id, est_lu) WHERE est_lu = false;
 
 CREATE INDEX idx_notifications_candidat ON notifications(candidat_id);
 CREATE INDEX idx_notifications_candidature ON notifications(candidature_id);
